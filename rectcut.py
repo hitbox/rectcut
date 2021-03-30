@@ -1,18 +1,158 @@
+import abc
 import argparse
 import contextlib
+import enum
 import itertools
 import os
 
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     import pygame
 
+def quit():
+    pygame.event.post(pygame.event.Event(pygame.QUIT))
+
+def connect_events(obj, prefix='on_'):
+    """
+    Return dictionary of event callbacks by inspecting `obj` for methods with
+    `prefix`.
+    """
+    callbacks = {}
+    for name in dir(obj):
+        if name.startswith(prefix):
+            event_name = name[len(prefix):].upper()
+            event = getattr(pygame, event_name)
+            callbacks[event] = getattr(obj, name)
+    return callbacks
+
+class EngineError(Exception):
+    pass
+
+
+class Cut(enum.Enum):
+
+    VERTICAL = 0
+    HORIZONTAL = 1
+
+
+class ToolBase(metaclass=abc.ABCMeta):
+    pass
+
+
+class RectCutTool(ToolBase):
+
+    def __init__(self):
+        pass
+
+
+class Display:
+
+    def __init__(self, screensize, modeargs=None):
+        self.screensize = screensize
+        self.modeargs = modeargs
+        if self.modeargs is None:
+            self.modeargs = dict()
+        self._surface = pygame.display.set_mode(self.screensize, **self.modeargs)
+        self._initial = self._surface.copy()
+
+    @property
+    def surface(self):
+        return self._surface
+
+    def screenpos(self, x, y):
+        return (x, y)
+
+    def spacepos(self, x, y):
+        return (x, y)
+
+    def clear(self):
+        self._surface.blit(self._initial, (0,0))
+
+    def update(self):
+        pygame.display.flip()
+
+
+class ScaledDisplay(Display):
+
+    def __init__(self, screensize, buffersize, modeargs=None):
+        super().__init__(screensize, modeargs)
+        self.buffersize = buffersize
+        self._buffer = pygame.Surface(self.buffersize)
+        self._buffer_initial = self._buffer.copy()
+
+        sw, sh = screensize
+        bw, bh = buffersize
+        self.xscale = sw // bw
+        self.yscale = sh // bh
+
+    @property
+    def surface(self):
+        return self._buffer
+
+    def spacepos(self, x, y):
+        return (x // self.xscale, y // self.yscale)
+
+    def screenpos(self, x, y):
+        raise NotImplementedError
+        return (x, y)
+
+    def clear(self):
+        self._buffer.blit(self._buffer_initial, (0, 0))
+
+    def update(self):
+        pygame.transform.scale(self._buffer, self.screensize, self._surface)
+        pygame.display.flip()
+
+
+class BaseState(metaclass=abc.ABCMeta):
+    """
+    Must inherit this to be run by an engine. Optional
+    `Engine.event_handler_attribute` attribute is called to display all events
+    except `pygame.QUIT`.
+    """
+
+    @abc.abstractmethod
+    def update(self, elapsed):
+        pass
+
+
+class Engine:
+    """
+    Engine runs a state.
+    """
+
+    event_handler_attribute = 'event_handlers'
+
+    def __init__(self, clock, screen, framerate=60):
+        self.clock = clock
+        self.screen = screen
+        self.framerate = framerate
+        self.running = False
+
+    def run(self, state):
+        self.running = True
+        while self.running:
+            self.update(state)
+
+    def update(self, state):
+        event_handlers = getattr(state, self.event_handler_attribute, {})
+        elapsed = self.clock.tick(self.framerate)
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type in event_handlers:
+                event_handlers[event.type](event)
+        self.screen.clear()
+        state.update(elapsed)
+        self.screen.update()
+
+
 def cutrect(rect, slicedir, pos):
     "Cut rect returning two"
     x, y = pos
-    if slicedir == 'v':
+    if slicedir == Cut.VERTICAL:
         a = pygame.Rect(rect.left, rect.top, x - rect.left, rect.height)
         b = pygame.Rect(x, rect.top, rect.right - x, rect.height)
-    elif slicedir == 'h':
+    elif slicedir == Cut.HORIZONTAL:
         a = pygame.Rect(rect.left, rect.top, rect.width, y - rect.top)
         b = pygame.Rect(rect.left, y, rect.width, rect.bottom - y)
     return (a, b)
@@ -20,10 +160,11 @@ def cutrect(rect, slicedir, pos):
 def cutrectline(rect, slicedir, pos):
     "Preview line"
     x, y = pos
-    if slicedir == 'v':
-        return ((x, rect.top), (x, rect.bottom-1))
-    elif slicedir == 'h':
-        return ((rect.left, y), (rect.right-1, y))
+    if slicedir == Cut.VERTICAL:
+        start, end = ((x, rect.top), (x, rect.bottom-1))
+    elif slicedir == Cut.HORIZONTAL:
+        start, end = ((rect.left, y), (rect.right-1, y))
+    return start, end
 
 class RectAttr:
 
@@ -43,8 +184,6 @@ class RectAttr:
 
     @value.setter
     def value(self, value):
-        # XXX
-        # Left off here trying to do the linked rect dragging thing.
         if self.attribute == 'right':
             self.rect.width = value
         elif self.attribute == 'left':
@@ -66,10 +205,10 @@ class RectLink:
 
 class Rects:
 
-    def __init__(self, rect):
-        self.rects = [rect]
+    def __init__(self, *rects):
+        self.rects = list(rects)
         self.preview = None
-        self.slicedirs = itertools.cycle('vh')
+        self.slicedirs = itertools.cycle(Cut)
         self.slicedir = next(self.slicedirs)
 
     def cutrect(self, pos):
@@ -114,110 +253,62 @@ class Rects:
         self.slicedir = next(self.slicedirs)
 
 
-def run_cutrect():
-    # NOTE
-    # 1. messed up for small rects
-    # 2. loses a pixel on the right and bottom some times.
-    SCREENSIZE = (800, 800)
-    BUFFSIZE = (200, 200)
-    pygame.display.init()
-    pygame.font.init()
-    screen = pygame.display.set_mode(SCREENSIZE)
-    buffer = pygame.Surface(BUFFSIZE)
-    xscale = screen.get_rect().width // buffer.get_rect().width
-    yscale = screen.get_rect().height // buffer.get_rect().height
-    clock = pygame.time.Clock()
-    rects = Rects(buffer.get_rect().inflate(
-        -buffer.get_rect().width*.25,
-        -buffer.get_rect().width*.25))
-    font = pygame.font.Font(None, 16)
-    mouseposimage = pygame.Surface((0,0))
-    running = True
-    while running:
-        elapsed = clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    pygame.event.post(pygame.event.Event(pygame.QUIT))
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:
-                    x, y = event.pos
-                    x //= xscale
-                    y //= yscale
-                    rects.cutrect((x, y))
-                elif event.button == 3:
-                    rects.switchdir()
-                    x, y = event.pos
-                    x //= xscale
-                    y //= yscale
-                    rects.update_preview((x, y))
-            elif event.type == pygame.MOUSEMOTION:
-                mouseposimage = font.render(f'{event.pos}', True, (200,200,200))
-                x, y = event.pos
-                x //= xscale
-                y //= yscale
-                rects.update_preview((x, y))
-        buffer.fill((0,0,0))
+class RectCutState(BaseState):
+    """
+    Demo cutting one big rect into littler ones.
+    """
+
+    def __init__(self, engine, initial_rect):
+        self.engine = engine
+        self.initial_rect = initial_rect
+        self.rects = Rects(self.initial_rect)
+        self.event_handlers = connect_events(self)
+
+    def on_keydown(self, event):
+        if event.key in (pygame.K_ESCAPE, pygame.K_q):
+            quit()
+
+    def on_mousebuttondown(self, event):
+        if event.button == pygame.BUTTON_LEFT:
+            pos = self.engine.screen.spacepos(*event.pos)
+            self.rects.cutrect(pos)
+        elif event.button == pygame.BUTTON_RIGHT:
+            self.rects.switchdir()
+            pos = self.engine.screen.spacepos(*event.pos)
+            self.rects.update_preview(pos)
+
+    def on_mousemotion(self, event):
+        pos = self.engine.screen.spacepos(*event.pos)
+        self.rects.update_preview(pos)
+
+    def update(self, elapsed):
+        screen = self.engine.screen
+        screen.clear()
         # draw all rects
-        for rect in rects.rects:
-            pygame.draw.rect(buffer, (200,200,200), rect, 1)
+        for rect in self.rects.rects:
+            pygame.draw.rect(screen.surface, (200,200,200), rect, 1)
         # draw cut preview
-        if rects.preview:
-            pygame.draw.line(buffer, (200,0,0), rects.preview[0], rects.preview[1])
-        # draw mouse position image
-        x, y = pygame.mouse.get_pos()
-        x //= xscale
-        y //= yscale
-        buffer.blit(mouseposimage, (x, y))
-        # finalize draw
-        pygame.transform.scale(buffer, screen.get_rect().size, screen)
-        pygame.display.flip()
+        if self.rects.preview:
+            a, b = self.rects.preview
+            pygame.draw.line(screen.surface, (200,0,0), a, b)
+        screen.update()
 
-def run_drag():
+
+def run():
     pygame.display.init()
-    clock = pygame.time.Clock()
-    screen = pygame.display.set_mode((600,600))
-    rect = screen.get_rect()
-    rect = rect.inflate(-rect.width * .25, -rect.height * .25)
-    rect1, rect2 = cutrect(rect, 'v', rect.center)
-    rectlink = RectLink(RectAttr(rect1, 'right'), RectAttr(rect2, 'left'), 'x')
-    drag = None
-    running = True
-    while running:
-        elapsed = clock.tick(60)
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    pygame.event.post(pygame.event.Event(pygame.QUIT))
-            elif event.type == pygame.MOUSEMOTION:
-                x, y = event.pos
-                if drag and drag.concerning == 'x':
-                    drag.rectattr1.value += event.rel[0]
-                    drag.rectattr2.value += event.rel[0]
-                else:
-                    if rectlink.concerning == 'x' and rectlink.collideattr(x):
-                        pygame.mouse.set_system_cursor(pygame.SYSTEM_CURSOR_SIZEWE)
-                    else:
-                        pygame.mouse.set_system_cursor(pygame.SYSTEM_CURSOR_ARROW)
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                x, y = event.pos
-                if rectlink.collideattr(x):
-                    drag = rectlink
-                elif rectlink.collideattr(y):
-                    drag = rectlink
-            elif event.type == pygame.MOUSEBUTTONUP:
-                drag = None
 
-        screen.fill((0,0,0))
-        pygame.draw.rect(screen, (200,)*3, rect1)
-        pygame.draw.rect(screen, (200,)*3, rect2)
-        pygame.draw.rect(screen, (200,50,50), rect1, 1)
-        pygame.draw.rect(screen, (50,200,50), rect2, 1)
-        pygame.display.flip()
+    rect = pygame.Rect(0, 0, 100, 100)
+
+    screen = ScaledDisplay((8*rect.width, 8*rect.height), rect.size)
+    #screen = Display(rect.size)
+
+    clock = pygame.time.Clock()
+    engine = Engine(clock, screen)
+
+    initial_rect = rect.inflate(-rect.width*.25, -rect.width*.25)
+    state = RectCutState(engine, initial_rect)
+
+    engine.run(state)
 
 def main(argv=None):
     """
@@ -227,7 +318,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     #run_cutrect()
-    run_drag()
+    #run_drag()
+    run()
 
 if __name__ == '__main__':
     main()
