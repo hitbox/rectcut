@@ -58,10 +58,10 @@ class Display:
     def surface(self):
         return self._surface
 
-    def screenpos(self, x, y):
+    def toscreen(self, x, y):
         return (x, y)
 
-    def spacepos(self, x, y):
+    def tospace(self, x, y):
         return (x, y)
 
     def clear(self):
@@ -88,10 +88,10 @@ class ScaledDisplay(Display):
     def surface(self):
         return self._buffer
 
-    def spacepos(self, x, y):
+    def tospace(self, x, y):
         return (x // self.xscale, y // self.yscale)
 
-    def screenpos(self, x, y):
+    def toscreen(self, x, y):
         raise NotImplementedError
         return (x, y)
 
@@ -270,16 +270,19 @@ class RectCutState(BaseState):
 
     def on_mousebuttondown(self, event):
         if event.button == pygame.BUTTON_LEFT:
-            pos = self.engine.screen.spacepos(*event.pos)
+            pos = self.engine.screen.tospace(*event.pos)
             self.rects.cutrect(pos)
         elif event.button == pygame.BUTTON_RIGHT:
             self.rects.switchdir()
-            pos = self.engine.screen.spacepos(*event.pos)
+            pos = self.engine.screen.tospace(*event.pos)
             self.rects.update_preview(pos)
 
     def on_mousemotion(self, event):
-        pos = self.engine.screen.spacepos(*event.pos)
+        pos = self.engine.screen.tospace(*event.pos)
         self.rects.update_preview(pos)
+        # XXX
+        # Left off here thinking about dragging again. Want to drag "connected"
+        # rects too.
 
     def update(self, elapsed):
         screen = self.engine.screen
@@ -316,9 +319,6 @@ def main(argv=None):
     """
     parser = argparse.ArgumentParser(description=main.__doc__)
     args = parser.parse_args(argv)
-
-    #run_cutrect()
-    #run_drag()
     run()
 
 if __name__ == '__main__':
